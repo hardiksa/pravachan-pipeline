@@ -107,8 +107,8 @@ def home(request: Request):
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     nlm_prof = os.environ.get("PRAVACHAN_NLM_PROFILE", os.path.expanduser("~/.pravachan-notebooklm-firefox"))
     nlm_ready = Path(nlm_prof).exists()
-    return templates.TemplateResponse("index.html",
-        {"request": request, "jobs": jobs, "title_styles": ["topic","numbered","granth","day","auto"],
+    return templates.TemplateResponse(request, "index.html",
+        {"jobs": jobs, "title_styles": ["topic","numbered","granth","day","auto"],
          "has_key": has_key, "nlm_ready": nlm_ready, "nlm_profile": nlm_prof})
 
 @app.post("/jobs")
