@@ -4,12 +4,12 @@ pravachan-web — a small self-hosted web app around pipeline.py.
 
 Paste a Google Drive / YouTube link (or upload audio), pick a set name + title
 style, and it queues a job that runs the same pipeline (download → transcribe →
-multi-agent Claude typeset → PDF/DOCX) on THIS machine, using the client's own
-ANTHROPIC_API_KEY / Claude auth. A dashboard shows live status and download links.
+OpenRouter typeset + consensus verification → PDF/DOCX) on THIS machine, using the
+client's own OPENROUTER_API_KEY. A dashboard shows live status and download links.
 
 Run:   pravachan-web            # or:  python -m webapp.server
 Env:   PRAVACHAN_OUT   output root (default ~/pravachan-output)
-       ANTHROPIC_API_KEY  passed through to the Claude build stage
+       OPENROUTER_API_KEY  passed through to the build stage
        PRAVACHAN_PORT  (default 8765)
 """
 from __future__ import annotations
@@ -76,7 +76,7 @@ def run_job(jid: int):
                                  text=True, cwd=str(REPO), env={**os.environ})
             for line in p.stdout:                       # stream stage progress into the log
                 lf.write(line); lf.flush()
-                m = re.search(r"(downloading|transcribing|building|compressing)", line, re.I)
+                m = re.search(r"(downloading|transcribing|building|compressing|consensus)", line, re.I)
                 if m: set_status(jid, stage=m.group(1).lower())
             rc = p.wait()
         except Exception as e:
@@ -104,7 +104,7 @@ def outputs(out_dir: Path):
 def home(request: Request):
     with db() as c:
         jobs = [dict(r) for r in c.execute("SELECT * FROM jobs ORDER BY id DESC").fetchall()]
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_key = bool(os.environ.get("OPENROUTER_API_KEY"))
     nlm_prof = os.environ.get("PRAVACHAN_NLM_PROFILE", os.path.expanduser("~/.pravachan-notebooklm-firefox"))
     nlm_ready = Path(nlm_prof).exists()
     return templates.TemplateResponse(request, "index.html",
@@ -115,7 +115,8 @@ def home(request: Request):
 async def create_job(
     set_name: str = Form(...), source: str = Form(""), source_type: str = Form("auto"),
     title_style: str = Form("auto"), fmt: str = Form("both"), columns: int = Form(2),
-    size: int = Form(18), portrait: str = Form(""), model: str = Form("claude-opus-5"),
+    size: int = Form(18), portrait: str = Form(""),
+    model: str = Form(os.environ.get("PRAVACHAN_BUILD_MODEL", "deepseek/deepseek-v4.1-flash")),
     workers: int = Form(4), transcriber: str = Form("notebooklm"), nlm_profile: str = Form(""),
     upload: UploadFile | None = File(None)):
     sname = slug(set_name); out_dir = OUT_ROOT / sname

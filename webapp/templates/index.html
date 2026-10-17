@@ -25,9 +25,9 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 </style></head><body>
 <div class="wrap">
   <h1>Pravachan Pipeline</h1>
-  <p class="sub">Drive / YouTube / upload → transcript → multi-agent Claude typeset → PDF + DOCX. Runs on this machine, on your own Claude key.</p>
+  <p class="sub">Drive / YouTube / upload → transcript → OpenRouter typeset + consensus → PDF + DOCX. Runs on this machine, on your own OpenRouter key.</p>
 
-  {% if not has_key %}<div class="warn">⚠️ <b>ANTHROPIC_API_KEY is not set</b> in this server's environment — the typeset (build) stage will fail. Set it and restart, or run <code>ant auth login</code>.</div>{% endif %}
+  {% if not has_key %}<div class="warn">⚠️ <b>OPENROUTER_API_KEY is not set</b> in this server's environment — the typeset (build) stage will fail. Export your OpenRouter key (sk-or-...) and restart the server.</div>{% endif %}
   {% if not nlm_ready %}<div class="warn">⚠️ <b>NotebookLM not logged in yet.</b> Transcription uses NotebookLM in a dedicated Firefox profile. Run <code>pravachan-nlm-login</code> once on this machine and sign in, then jobs can transcribe. (profile: <code>{{nlm_profile}}</code>)</div>{% endif %}
 
   <div class="card">
@@ -55,9 +55,10 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
         <div><label>Font size</label><input name="size" value="18"></div>
       </div>
       <div class="row">
-        <div><label>Build workers (parallel Claude agents)</label><input name="workers" value="4"></div>
-        <div><label>Claude model</label><input name="model" value="claude-opus-5"></div>
+        <div><label>Build workers (parallel typeset agents)</label><input name="workers" value="4"></div>
+        <div><label>Build model (OpenRouter)</label><input name="model" value="deepseek/deepseek-v4.1-flash"></div>
       </div>
+      <p class="mut">Every document is consensus-verified by 2 independent models from other vendors before PDF/DOCX (change with <code>PRAVACHAN_VERIFY_MODELS</code>).</p>
       <button type="submit">Queue job ▸</button>
     </form>
   </div>
