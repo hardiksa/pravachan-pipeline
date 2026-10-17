@@ -142,7 +142,9 @@ def parse_fragment(fragment):
 
     for el in soup.find_all(["h1", "h2", "p", "div"], recursive=True):
         # only top-level-ish body elements; skip anything inside summary/mindmap
-        if el.find_parent("div", class_=["summary", "mindmap"]):
+        # and anything inside container divs (box/verse/stats) — their content is
+        # rendered BY the container, so picking up inner <p>s would duplicate it
+        if el.find_parent("div", class_=["summary", "mindmap", "box", "verse", "stats"]):
             continue
         cls = el.get("class", [])
         if el.name == "h1":
