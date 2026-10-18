@@ -1,13 +1,13 @@
 [project]
 name = "pravachan-pipeline"
 version = "0.2.0"
-description = "Jain pravachan audio → transcript → multi-agent Claude typeset → PDF + DOCX. CLI, web app, and Claude Code skills."
+description = "Jain pravachan audio → transcript → OpenRouter typeset + cross-model consensus → PDF + DOCX. CLI, web app, and Claude Code skills."
 requires-python = ">=3.10"
 dependencies = [
     "gdown>=5.0",
     "yt-dlp>=2024.1",
     "selenium>=4.18",          # NotebookLM automation (needs Firefox + geckodriver)
-    "anthropic>=1.0",
+    "requests>=2.31",          # OpenRouter build stage (openrouter.py)
     "weasyprint>=60",
     "python-docx>=1.0",
     "beautifulsoup4>=4.12",
@@ -30,7 +30,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["pipeline", "nlm", "gstt"]
+py-modules = ["pipeline", "nlm", "gstt", "openrouter"]
 packages = ["webapp"]
 include-package-data = true
 

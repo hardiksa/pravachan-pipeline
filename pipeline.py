@@ -5,9 +5,10 @@ pravachan-pipeline — Drive folder ➜ audio ➜ transcript ➜ typeset PDF/DOC
 Give it a Google Drive folder link, a YouTube video/playlist URL, or a local audio
 dir. It downloads the audio, transcodes/compresses as needed, transcribes each file
 via NotebookLM (Selenium + a dedicated Firefox profile; Google Cloud STT is an optional
-fallback), runs the bundled jain-pravachan-transcript skill via the Claude API to clean
-+ structure the transcript, and typesets the result as PDF + DOCX. Resumable: anything
-already produced is skipped.
+fallback), runs the bundled jain-pravachan-transcript skill via an OpenRouter model —
+consensus-verified by independent models from other vendors — to clean + structure the
+transcript, and typesets the result as PDF + DOCX. Resumable: anything already produced
+is skipped.
 
 Transcription requires a one-time NotebookLM login on this machine: `pravachan-nlm-login`.
 
@@ -18,12 +19,17 @@ Stages run in order; use --only to run a subset:
     --only download,transcribe,build
 
 Env:
-    ANTHROPIC_API_KEY   required for the 'build' stage (or an `ant auth login` profile)
+    OPENROUTER_API_KEY          required for the 'build' stage (OpenRouter key, sk-or-...)
+    PRAVACHAN_BUILD_MODEL       build model id       (default: deepseek/deepseek-v4.1-flash)
+    PRAVACHAN_VERIFY_MODELS     consensus verifiers  (default: z-ai/glm-5.3,qwen/qwen3.8-flash)
+    PRAVACHAN_CONSENSUS_ROUNDS  max fix rounds       (default: 2)
 """
 from __future__ import annotations
-import argparse, os, re, subprocess, sys, tempfile, shutil
+import argparse, json, os, re, subprocess, sys, tempfile, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import openrouter
 
 HERE = Path(__file__).resolve().parent
 SKILL = HERE / "skill"
@@ -53,14 +59,16 @@ def find_audio(root: Path):
 # ── stage 1: download ─────────────────────────────────────────────────────────
 def download(url: str, audio_dir: Path):
     audio_dir.mkdir(parents=True, exist_ok=True)
-    log(f"downloading Drive folder (recursive) → {audio_dir}")
-    # gdown --folder recurses into nested subfolders and mirrors the tree.
+    log(f"downloading from Google Drive → {audio_dir}")
+    # try a folder first (gdown --folder recurses into nested subfolders and mirrors the tree)
     subprocess.run([sys.executable, "-m", "gdown", "--folder", url, "-O", str(audio_dir),
                     "--remaining-ok"], check=False)
-    # older gdown lacks --remaining-ok; retry without it
     if not find_audio(audio_dir):
-        subprocess.run([sys.executable, "-m", "gdown", "--folder", url, "-O", str(audio_dir)],
-                       check=True)
+        # then a single-file link — gdown --folder refuses those; plain gdown <url> -O dir/ fetches it
+        log("no folder download — trying single-file Drive link")
+        subprocess.run([sys.executable, "-m", "gdown", url, "-O", str(audio_dir) + "/"], check=False)
+    if not find_audio(audio_dir):
+        raise SystemExit("download produced no audio files — check the Drive link's sharing settings")
     log(f"downloaded {len(find_audio(audio_dir))} audio files")
 
 def download_youtube(url: str, audio_dir: Path):
@@ -118,7 +126,7 @@ def transcribe_all(audio_dir: Path, trans_dir: Path, transcriber: str, lang: str
     else:
         raise SystemExit(f"unknown transcriber {transcriber!r} (use notebooklm|google)")
 
-# ── stage 3: skill (Claude API) → HTML → PDF/DOCX ─────────────────────────────
+# ── stage 3: skill (OpenRouter + consensus) → HTML → PDF/DOCX ─────────────────
 # Title conventions per set type. `{N}` and `{date}` are derived by the model from the
 # transcript FILENAME (leading number, trailing date), rendered in GUJARATI NUMERALS.
 TITLE_SPECS = {
@@ -160,57 +168,68 @@ def skill_system_prompt(title_style: str = "auto") -> str:
     ]
     return "".join(parts)
 
-def clean_html(s: str) -> str:
-    s = s.strip()
-    s = re.sub(r"^```[a-zA-Z]*\n", "", s)
-    s = re.sub(r"\n```$", "", s)
-    i = s.find("<h1")
-    return s[i:] if i != -1 else s
-
 def build_one(txt: Path, trans_dir: Path, pdf_dir: Path, model: str, fmt: str, columns: int,
-              size: int, portrait: bool, title_style: str = "auto"):
-    import anthropic
+              size: int, portrait: bool, title_style: str = "auto",
+              verify_model_list: list[str] | None = None, rounds: int = 0):
     rel = txt.relative_to(trans_dir)
     base = rel.with_suffix("")            # strip the ".txt"
     if base.suffix == "":                 # original had no ext (e.g. "1. …")
         base = rel.parent / rel.stem
     out_base = pdf_dir / base
-    if (out_base.with_suffix(".pdf")).exists():
+    if (out_base.parent / (out_base.name + ".pdf")).exists():   # exactly what build_doc writes
         return "skip"
     out_base.parent.mkdir(parents=True, exist_ok=True)
 
     transcript = txt.read_text(encoding="utf-8")
-    client = anthropic.Anthropic()       # resolves ANTHROPIC_API_KEY / ant profile
-    with client.messages.stream(
-        model=model, max_tokens=32000,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "high"},
-        system=skill_system_prompt(title_style),
-        messages=[{"role": "user",
-                   "content": f"Transcript filename: {txt.name}\n\nTRANSCRIPT:\n{transcript}"}],
-    ) as stream:
-        msg = stream.get_final_message()
-    html = clean_html("".join(b.text for b in msg.content if b.type == "text"))
+    messages = [
+        {"role": "system", "content": skill_system_prompt(title_style)},
+        {"role": "user", "content": f"Transcript filename: {txt.name}\n\nTRANSCRIPT:\n{transcript}"},
+    ]
+    html, usage = openrouter.chat(model, messages, max_tokens=32000)
+    html = openrouter.strip_to_fragment(html)
+    log(f"  generated ← {txt.name} ({model}, {usage.get('completion_tokens', '?')} out tok)")
+
+    report = None
+    if verify_model_list:
+        html, report = openrouter.consensus_build(
+            transcript, html, openrouter.verifier_references(SKILL),
+            model, verify_model_list, rounds, log=log)
+        st = report.get("stats", {})
+        log(f"  consensus ← {txt.name}: {'PASS' if report['passed'] else 'FLAGGED'}"
+            f" ({report['rounds']} round(s), {st.get('prompt_tokens', 0)} in / "
+            f"{st.get('completion_tokens', 0)} out tok)")
+        if not report["passed"]:
+            flag = out_base.parent / (out_base.name + ".review.json")
+            flag.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+            log(f"  ⚠ consensus not passed for {txt.name} — wrote {flag.name} for human review")
+
+    if os.environ.get("PRAVACHAN_KEEP_FRAGMENT"):
+        keep = out_base.parent / (out_base.name + ".fragment.html")
+        keep.write_text(html, encoding="utf-8")
+        log(f"  kept fragment ← {keep.name}")
 
     with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as fp:
         fp.write(html); frag = fp.name
     try:
         cmd = [sys.executable, str(BUILD_DOC), frag, "--out", str(out_base),
-               "--format", fmt, "--columns", str(columns), "--size", str(size)]
+               "--format", fmt, "--columns", str(columns), "--size", str(size),
+               "--src-name", txt.name]
         if portrait:
             cmd.append("--portrait")
         subprocess.run(cmd, check=True)
     finally:
         os.unlink(frag)
-    return "done"
+    return "done" if (report is None or report["passed"]) else "done ⚠flagged"
 
 def build_all(trans_dir: Path, pdf_dir: Path, model: str, fmt: str, columns: int, size: int,
-              portrait: bool, workers: int, title_style: str = "auto"):
+              portrait: bool, workers: int, title_style: str = "auto",
+              verify_model_list: list[str] | None = None, rounds: int = 0):
     jobs = sorted(trans_dir.rglob("*.txt"))
-    log(f"building {len(jobs)} document(s) via {model} (workers={workers}, title={title_style})")
+    consensus = f", consensus via {','.join(verify_model_list)}" if verify_model_list else ""
+    log(f"building {len(jobs)} document(s) via {model} (workers={workers}, title={title_style}{consensus})")
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(build_one, t, trans_dir, pdf_dir, model, fmt, columns, size, portrait,
-                          title_style): t
+                          title_style, verify_model_list, rounds): t
                 for t in jobs}
         for f in as_completed(futs):
             t = futs[f]
@@ -233,8 +252,18 @@ def main():
                     help="compress any audio larger than this (MB) instead of splitting")
     ap.add_argument("--only", default="download,transcribe,build",
                     help="comma list of stages to run (default: all)")
-    ap.add_argument("--workers", type=int, default=4, help="parallel build workers (Claude stage)")
-    ap.add_argument("--model", default="claude-opus-5", help="Claude model for the skill stage")
+    ap.add_argument("--workers", type=int, default=4, help="parallel build workers (typeset stage)")
+    ap.add_argument("--model", default=None,
+                    help="OpenRouter model for the build stage "
+                         "(default: $PRAVACHAN_BUILD_MODEL or deepseek/deepseek-v4.1-flash)")
+    ap.add_argument("--verify-models", default="",
+                    help="comma list of OpenRouter models for consensus verification, from vendors "
+                         "other than the build model (default: $PRAVACHAN_VERIFY_MODELS or "
+                         "z-ai/glm-5.3,qwen/qwen3.8-flash)")
+    ap.add_argument("--no-consensus", action="store_true",
+                    help="skip consensus verification (single-model generation only)")
+    ap.add_argument("--consensus-rounds", type=int, default=openrouter.consensus_rounds(),
+                    help="max fix rounds when verification fails (default 2)")
     ap.add_argument("--transcriber", default="notebooklm", choices=["notebooklm", "google"],
                     help="transcription engine: notebooklm (default) | google (Cloud STT fallback)")
     ap.add_argument("--nlm-profile", default=os.environ.get("PRAVACHAN_NLM_PROFILE",
@@ -247,6 +276,13 @@ def main():
     ap.add_argument("--size", type=int, default=18)
     ap.add_argument("--portrait", action="store_true")
     args = ap.parse_args()
+
+    model = args.model or openrouter.build_model()
+    if args.no_consensus:
+        verify_model_list = []
+    else:
+        verify_model_list = ([m.strip() for m in args.verify_models.split(",") if m.strip()]
+                             or openrouter.verify_models())
 
     out = Path(args.out).expanduser().resolve()
     audio_dir, trans_dir, pdf_dir = out / "audio", out / "transcripts", out / "pdfs"
@@ -282,8 +318,9 @@ def main():
         transcribe_all(audio_dir, trans_dir, args.transcriber, args.lang,
                        args.nlm_profile, args.nlm_chunk)
     if "build" in stages:
-        build_all(trans_dir, pdf_dir, args.model, args.format, args.columns, args.size,
-                  args.portrait, args.workers, args.title_style)
+        build_all(trans_dir, pdf_dir, model, args.format, args.columns, args.size,
+                  args.portrait, args.workers, args.title_style,
+                  verify_model_list, args.consensus_rounds)
 
     log("done. outputs:")
     log(f"  audio       {audio_dir}")

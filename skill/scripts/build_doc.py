@@ -50,6 +50,14 @@ from pathlib import Path
 
 GUJ_SERIF = "Noto Serif Gujarati"
 GUJ_SANS = "Noto Sans Gujarati"
+DEV_SERIF = "Noto Serif Devanagari"
+DEV_SANS = "Noto Sans Devanagari"
+# Font stacks: Gujarati first, Devanagari second (mixed-script/Hindi transcripts),
+# generic last. Regular-weight Devanagari MUST land on Noto Devanagari — Apple's
+# ".SF Devanagari" system font is subset by WeasyPrint into an invalid CFF embed
+# (poppler: "Embedded font file may be invalid"; PDFKit then draws garbage glyphs).
+SERIF_STACK = f"'{GUJ_SERIF}','{DEV_SERIF}',serif"
+SANS_STACK = f"'{GUJ_SANS}','{DEV_SANS}',sans-serif"
 BROWN_HEX = "7A2E00"        # title
 RULE_HEX = "D9A066"         # brown-gold heading bar
 VERSE_BG = "FAF4EC"
@@ -140,9 +148,42 @@ def parse_fragment(fragment):
     p.summary = soup.find("div", class_="summary")
     p.mindmap = soup.find("div", class_="mindmap")
 
+    # ---- normalise common variant markup the model sometimes emits -------------
+    # Contract (skill/SKILL.md) = <div class="summary"> + <div class="leaf">; models
+    # occasionally emit a bare "<h2>સારાંશ</h2> + <p>…" summary (and a stray mindmap
+    # heading). Fold those into the canonical structure so the layout renders them.
+    if p.summary is None:
+        for h in soup.find_all("h2"):
+            if "સારાંશ" in h.get_text() or "सारांश" in h.get_text():
+                block = []
+                sib = h.find_next_sibling()
+                while sib is not None:
+                    nm = getattr(sib, "name", None)
+                    cls = (sib.get("class") or []) if nm else []
+                    if nm == "h2" or (nm == "div" and ("mindmap" in cls or "summary" in cls)):
+                        break
+                    block.append(sib)
+                    sib = sib.find_next_sibling()
+                if block:
+                    wrap = soup.new_tag("div")
+                    wrap["class"] = "summary"
+                    h.insert_after(wrap)
+                    for b in block:
+                        wrap.append(b.extract())
+                    p.summary = wrap
+                    h.extract()
+                break
+    if p.mindmap is not None:
+        for h in list(soup.find_all("h2")):
+            t = h.get_text()
+            if "વિચારનકશો" in t or "विचारनकश" in t:
+                h.extract()
+
     for el in soup.find_all(["h1", "h2", "p", "div"], recursive=True):
         # only top-level-ish body elements; skip anything inside summary/mindmap
-        if el.find_parent("div", class_=["summary", "mindmap"]):
+        # and anything inside container divs (box/verse/stats) — their content is
+        # rendered BY the container, so picking up inner <p>s would duplicate it
+        if el.find_parent("div", class_=["summary", "mindmap", "box", "verse", "stats"]):
             continue
         cls = el.get("class", [])
         if el.name == "h1":
@@ -196,10 +237,16 @@ def mindmap_html(title, mm_div):
     for i, br in enumerate(branches[:5]):
         color = BRANCH_COLORS[i % len(BRANCH_COLORS)]
         rng = br.get("data-range", "")
-        # theme name = the branch's own text nodes (excluding leaves)
-        name_parts = [t for t in br.find_all(string=True, recursive=False)]
-        theme = "".join(name_parts).strip()
-        leaves = br.find_all("div", class_="leaf", recursive=False)
+        # theme name = the branch's own text nodes (excluding leaves); tolerate the
+        # "<b>theme</b>"-wrapped variant models sometimes emit
+        name_parts = [" ".join(str(t).split()) for t in br.find_all(string=True, recursive=False)]
+        for c in br.contents:
+            if getattr(c, "name", None) in ("b", "strong"):
+                name_parts.append(" ".join(c.get_text(" ", strip=True).split()))
+        theme = " ".join(t for t in name_parts if t).strip()
+        if not theme:
+            theme = " ".join(br.get_text(" ", strip=True).split())[:90]
+        leaves = br.find_all(["div", "p"], class_="leaf", recursive=False)
         leaf_html = []
         for lf in leaves[:3]:
             sec = lf.get("data-sec", "")
@@ -228,7 +275,7 @@ def mindmap_html(title, mm_div):
 
 
 MINDMAP_CSS = """
-.mm-wrap{display:flex;flex-direction:column;gap:2.2mm;font-family:"%(sans)s",sans-serif;}
+.mm-wrap{display:flex;flex-direction:column;gap:2.2mm;font-family:%(sans)s;}
 .mm-banner{background:#%(brown)s;border-radius:3mm;padding:2.4mm 3mm;text-align:center;color:#fff;}
 .mm-title{font-weight:700;font-size:12pt;line-height:1.15;}
 .mm-sub{font-weight:700;font-size:8.5pt;opacity:.9;margin-top:.6mm;}
@@ -244,7 +291,7 @@ MINDMAP_CSS = """
 .mm-chip{font-weight:700;font-size:9pt;min-width:4mm;}
 .mm-leaf-t{font-size:9pt;color:#222;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .mm-caption{text-align:center;font-size:7pt;color:#8a7a6a;margin-top:.8mm;}
-""" % {"sans": GUJ_SANS, "brown": BROWN_HEX, "beige": BOX_BORDER}
+""" % {"sans": SANS_STACK, "brown": BROWN_HEX, "beige": BOX_BORDER}
 
 
 # ======================================================================
@@ -255,27 +302,27 @@ A5_CSS = """
 @page {
   size: A5;
   margin: 10mm 9mm 10mm 14mm;
-  @top-center { content: string(runhead); font-family: "%(sans)s", sans-serif;
+  @top-center { content: string(runhead); font-family: %(sans)s;
                 font-size: 7.5pt; color: #%(runhead)s; }
 }
 @page :right {
   margin-left: 14mm; margin-right: 9mm;
-  @bottom-right { content: counter(page); font-family: "%(sans)s", sans-serif;
+  @bottom-right { content: counter(page); font-family: %(sans)s;
                   font-size: 8.5pt; color: #%(runhead)s; }
 }
 @page :left {
   margin-left: 9mm; margin-right: 14mm;
-  @bottom-left { content: counter(page); font-family: "%(sans)s", sans-serif;
+  @bottom-left { content: counter(page); font-family: %(sans)s;
                  font-size: 8.5pt; color: #%(runhead)s; }
 }
 @page :first {
   @top-center { content: none; }
 }
 html { -weasy-hyphens: none; }
-body { font-family: "%(serif)s", serif; font-size: 14pt; line-height: 1.35;
+body { font-family: %(serif)s; font-size: 14pt; line-height: 1.35;
        color: #1a1a1a; text-align: justify;
        string-set: runhead "%(runhead_text)s"; }
-h1.book-title { font-family: "%(sans)s", sans-serif; font-weight: 700;
+h1.book-title { font-family: %(sans)s; font-weight: 700;
                 font-size: 20pt; text-align: center; color: #%(brown)s;
                 margin: 0 0 2mm 0; line-height: 1.2; }
 .title-rule { border-bottom: 0.5mm solid #%(titlerule)s; margin: 0 0 4mm 0; }
@@ -285,7 +332,7 @@ nav.toc .toc-link { display: block; text-decoration: none; color: #2a2a2a;
 nav.toc .toc-link::after {
   content: leader('.') " " target-counter(attr(href url), page);
   color: #6a5a4a; }
-h2 { font-family: "%(sans)s", sans-serif; font-weight: 700; font-size: 15pt;
+h2 { font-family: %(sans)s; font-weight: 700; font-size: 15pt;
      color: #%(brown)s; margin: 4mm 0 1.5mm 0; border-left: 3.5px solid #%(rule)s;
      padding-left: 7px; line-height: 1.3; break-after: avoid; }
 p { margin: 0 0 3pt 0; }
@@ -314,7 +361,7 @@ def _assemble_a5_html(parsed, title):
     """Build the full A5 HTML and the ordered list of index (anchor_id, label)."""
     runhead_text = title.replace("\\", "\\\\").replace('"', '\\"')
     css = A5_CSS % {
-        "serif": GUJ_SERIF, "sans": GUJ_SANS, "brown": BROWN_HEX, "rule": RULE_HEX,
+        "serif": SERIF_STACK, "sans": SANS_STACK, "brown": BROWN_HEX, "rule": RULE_HEX,
         "versebg": VERSE_BG, "boxbg": BOX_BG, "boxbd": BOX_BORDER,
         "runhead": RUNHEAD_HEX, "titlerule": TITLE_RULE_HEX,
         "runhead_text": runhead_text, "mmcss": MINDMAP_CSS,
@@ -394,7 +441,7 @@ def render_mindmap_png(title, mm_div, out_png, width_px=1230):
     from weasyprint import HTML
     css = (
         "@page{size:125mm 188mm;margin:0;}"
-        f"body{{margin:3mm;font-family:'{GUJ_SANS}',sans-serif;}}" + MINDMAP_CSS
+        f"body{{margin:3mm;font-family:{SANS_STACK};}}" + MINDMAP_CSS
     )
     doc = (
         "<!DOCTYPE html><html lang='gu'><head><meta charset='utf-8'>"
