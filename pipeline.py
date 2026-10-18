@@ -59,14 +59,16 @@ def find_audio(root: Path):
 # ── stage 1: download ─────────────────────────────────────────────────────────
 def download(url: str, audio_dir: Path):
     audio_dir.mkdir(parents=True, exist_ok=True)
-    log(f"downloading Drive folder (recursive) → {audio_dir}")
-    # gdown --folder recurses into nested subfolders and mirrors the tree.
+    log(f"downloading from Google Drive → {audio_dir}")
+    # try a folder first (gdown --folder recurses into nested subfolders and mirrors the tree)
     subprocess.run([sys.executable, "-m", "gdown", "--folder", url, "-O", str(audio_dir),
                     "--remaining-ok"], check=False)
-    # older gdown lacks --remaining-ok; retry without it
     if not find_audio(audio_dir):
-        subprocess.run([sys.executable, "-m", "gdown", "--folder", url, "-O", str(audio_dir)],
-                       check=True)
+        # then a single-file link — gdown --folder refuses those; plain gdown <url> -O dir/ fetches it
+        log("no folder download — trying single-file Drive link")
+        subprocess.run([sys.executable, "-m", "gdown", url, "-O", str(audio_dir) + "/"], check=False)
+    if not find_audio(audio_dir):
+        raise SystemExit("download produced no audio files — check the Drive link's sharing settings")
     log(f"downloaded {len(find_audio(audio_dir))} audio files")
 
 def download_youtube(url: str, audio_dir: Path):
