@@ -40,7 +40,7 @@ and download PDF/DOCX/zip from the dashboard.
 ```bash
 brew install ffmpeg pango geckodriver
 brew install --cask firefox
-brew install --cask font-noto-serif-gujarati font-noto-sans-gujarati
+brew install --cask font-noto-serif-gujarati font-noto-sans-gujarati font-noto-serif-devanagari font-noto-sans-devanagari
 pip install -e .                          # installs `pravachan`, `pravachan-web`, `pravachan-nlm-login`
 export OPENROUTER_API_KEY=sk-or-...       # https://openrouter.ai/keys — used by the build stage
 pravachan-nlm-login                       # one-time: sign in to NotebookLM in a dedicated profile

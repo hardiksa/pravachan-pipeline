@@ -280,14 +280,37 @@ def contract_issues(fragment: str, transcript: str = "") -> list[dict]:
                 issues.append(dict(severity="error", check="structure.mindmap",
                                    detail=f"mindmap has {len(branches)} branches (need exactly 5)"))
             for bi, b in enumerate(branches, 1):
-                leaves = b.find_all("div", class_="leaf", recursive=False)
+                # accept contract markup (<div class="leaf">) and the common
+                # variant (<p class="leaf">); build_doc normalises both
+                leaves = b.find_all(["div", "p"], class_="leaf", recursive=False)
                 if len(leaves) != 3:
                     issues.append(dict(severity="error", check="structure.mindmap",
                                        detail=f"mindmap branch {bi} has {len(leaves)} leaves (need exactly 3)"))
         sm = soup.find("div", class_="summary")
+        bare = None
         if sm is None:
+            # tolerate the bare variant "<h2>સારાંશ</h2> + <p>…" (build_doc
+            # normalises it); require at least 3 follow-up paragraphs
+            for h in soup.find_all("h2"):
+                if "સારાંશ" in h.get_text() or "सारांश" in h.get_text():
+                    n = 0
+                    sib = h.find_next_sibling()
+                    while sib is not None:
+                        nm = getattr(sib, "name", None)
+                        if nm == "h2" or (nm == "div" and "mindmap" in (sib.get("class") or [])):
+                            break
+                        if nm == "p":
+                            n += 1
+                        sib = sib.find_next_sibling()
+                    if n >= 3:
+                        bare = h
+                    break
+        if sm is None and bare is None:
             issues.append(dict(severity="error", check="structure.summary",
                                detail="missing સારાંશ summary block"))
+        elif sm is None:
+            issues.append(dict(severity="warning", check="structure.stats",
+                               detail="summary written as bare h2 + paragraphs — no stats box"))
         else:
             if not sm.find("div", class_="stats"):
                 issues.append(dict(severity="warning", check="structure.stats",
